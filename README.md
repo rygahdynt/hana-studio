@@ -1,36 +1,82 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Hana Studio
+
+Visual social-media carousel creation and management platform.
+
+Create multi-slide carousel designs with images, text, and shapes. Export as PNG or ZIP.
 
 ## Getting Started
 
-First, run the development server:
+### Prerequisites
+
+- Node.js 18+
+- PostgreSQL
+
+### Install dependencies
+
+```bash
+npm install
+```
+
+### Configure environment
+
+Copy the example environment file and fill in your values:
+
+```bash
+cp .env.example .env.local
+```
+
+Required variables:
+
+- `DATABASE_URL` — PostgreSQL connection string
+
+### Start development server
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Available commands
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Command | Description |
+|---|---|
+| `npm run dev` | Start development server |
+| `npm run build` | Build for production |
+| `npm run start` | Start production server |
+| `npm run lint` | Run ESLint |
+| `npx prisma generate` | Generate Prisma client |
+| `npx prisma db push` | Push schema to database |
 
-## Learn More
+## Architecture
 
-To learn more about Next.js, take a look at the following resources:
+See [docs/architecture.md](docs/architecture.md) for the full architecture overview.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Project structure
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```
+src/
+├── app/              # Pages and layouts (App Router)
+├── components/       # Shared UI components
+├── features/         # Domain modules (projects, editor, assets)
+├── lib/              # Utilities and helpers
+├── server/           # Server-side logic
+├── stores/           # Client-side state management
+└── types/            # Shared type definitions
 
-## Deploy on Vercel
+prisma/               # Database schema and migrations
+docs/                 # Architecture documentation
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### Tech stack
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- **Next.js** — App Router, React 19, TypeScript
+- **Tailwind CSS** — Utility-first styling
+- **Prisma** — Database ORM (PostgreSQL)
+- **Fabric.js** — Canvas editor (planned)
+
+## Implementation status
+
+**Phase: Foundation** — Project setup, directory structure, configuration, documentation.
+
+No application features have been implemented yet. See the roadmap in `docs/architecture.md` for planned milestones.
