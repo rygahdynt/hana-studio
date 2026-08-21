@@ -42,7 +42,14 @@ async function executeOpenAIGeneration(brief: ContentBrief): Promise<AIProviderR
     : "https://api.openai.com/v1/chat/completions";
 
   const userPrompt = buildUserPrompt(brief);
-  const payload = {
+  const normalizedModel = model.toLowerCase().trim();
+  const isGpt5OrReasoningFamily =
+    normalizedModel.startsWith("gpt-5") ||
+    normalizedModel.startsWith("o1") ||
+    normalizedModel.startsWith("o3") ||
+    normalizedModel.startsWith("o4");
+
+  const payload: Record<string, unknown> = {
     model,
     messages: [
       { role: "system", content: SYSTEM_INSTRUCTION },
@@ -56,7 +63,7 @@ async function executeOpenAIGeneration(brief: ContentBrief): Promise<AIProviderR
         strict: true,
       },
     },
-    temperature: 0.7,
+    ...(isGpt5OrReasoningFamily ? {} : { temperature: 0.7 }),
   };
 
   const response = await fetch(endpoint, {
