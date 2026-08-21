@@ -16,9 +16,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { prompt, projectId, referenceAssetIds } = body as {
+    const { prompt, projectId, category, referenceAssetIds } = body as {
       prompt?: string;
       projectId?: string;
+      category?: string;
       referenceAssetIds?: string[];
     };
 
@@ -33,6 +34,7 @@ export async function POST(request: NextRequest) {
     const asset = await generateImageAsset(user.id, {
       prompt,
       projectId,
+      category,
       referenceAssetIds,
     });
 
@@ -49,11 +51,17 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: error.message }, { status: 503 });
       }
 
-      if (error.message.includes("Invalid image provider API key")) {
+      if (
+        error.message.includes("authentication failed") ||
+        error.message.includes("Google Service Account")
+      ) {
         return NextResponse.json({ error: error.message }, { status: 401 });
       }
 
-      if (error.message.includes("rate limit")) {
+      if (
+        error.message.includes("rate limit") ||
+        error.message.includes("quota exceeded")
+      ) {
         return NextResponse.json({ error: error.message }, { status: 429 });
       }
 

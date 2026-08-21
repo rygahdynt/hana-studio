@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   Clock,
   RotateCcw,
+  Sparkles,
 } from "lucide-react";
 import {
   Dialog,
@@ -29,10 +30,12 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   useAssets,
   useUpdateAssetCategory,
   useDeleteAsset,
+  useGenerateAsset,
   uploadAssetApi,
   type Asset,
 } from "../hooks/use-assets";
@@ -64,8 +67,16 @@ export function AssetLibraryDialog({
   const { data: assets, isLoading, error } = useAssets();
   const updateCategoryMutation = useUpdateAssetCategory();
   const deleteMutation = useDeleteAsset();
+  const generateAssetMutation = useGenerateAsset();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // AI Image Generator State
+  const [showAiGenerator, setShowAiGenerator] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiCategory, setAiCategory] = useState("");
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiSuccessMessage, setAiSuccessMessage] = useState<string | null>(null);
 
   // Drag & Drop State
   const [isDragging, setIsDragging] = useState(false);
@@ -370,6 +381,33 @@ export function AssetLibraryDialog({
   const inProgressInQueue = uploadQueue.filter((i) => i.status === "uploading" || i.status === "queued").length;
   const progressPercent = totalInQueue > 0 ? Math.round(((successInQueue + errorInQueue) / totalInQueue) * 100) : 0;
 
+  const handleGenerateAiAsset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!aiPrompt.trim()) return;
+
+    setAiError(null);
+    setAiSuccessMessage(null);
+
+    const targetCategory =
+      aiCategory.trim() ||
+      (selectedCategoryFilter !== "ALL" && selectedCategoryFilter !== "UNCATEGORIZED"
+        ? selectedCategoryFilter
+        : undefined);
+
+    try {
+      await generateAssetMutation.mutateAsync({
+        prompt: aiPrompt.trim(),
+        category: targetCategory,
+      });
+
+      setAiPrompt("");
+      setAiSuccessMessage("Image generated and added to library!");
+      setTimeout(() => setAiSuccessMessage(null), 4000);
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : "Failed to generate image.");
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[88vh] flex flex-col p-6 overflow-hidden">
@@ -379,11 +417,111 @@ export function AssetLibraryDialog({
               <ImageIcon className="w-5 h-5 text-blue-400" />
               {title}
             </DialogTitle>
+            <Button
+              size="sm"
+              variant={showAiGenerator ? "secondary" : "outline"}
+              onClick={() => {
+                setShowAiGenerator(!showAiGenerator);
+                setAiError(null);
+                setAiSuccessMessage(null);
+              }}
+              className="text-xs gap-1.5 h-8 border-neutral-700 bg-neutral-900/80 hover:bg-neutral-800"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+              {showAiGenerator ? "Hide AI Generator" : "Generate with AI"}
+            </Button>
           </div>
           <DialogDescription className="text-xs text-neutral-400">
             {description}
           </DialogDescription>
         </DialogHeader>
+
+        {/* AI Image Generator Panel */}
+        {showAiGenerator && (
+          <form
+            onSubmit={handleGenerateAiAsset}
+            className="p-3.5 rounded-xl bg-gradient-to-b from-neutral-900 to-neutral-950 border border-blue-900/40 shadow-lg flex flex-col gap-3 mb-2"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded-md bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                  <Sparkles className="w-3.5 h-3.5" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-semibold text-neutral-100">
+                    Vertex AI Image Generator
+                  </h4>
+                  <p className="text-[10px] text-neutral-400">
+                    Powered by Google Cloud Vertex AI (gemini-3.1-flash-image)
+                  </p>
+                </div>
+              </div>
+              <Badge variant="outline" className="text-[10px] border-neutral-700 text-neutral-300">
+                1080×1920 Ready
+              </Badge>
+            </div>
+
+            <Textarea
+              placeholder="Describe the image you want to generate (e.g. Modern minimalist workspace with soft natural morning light and sleek desk setup)..."
+              value={aiPrompt}
+              onChange={(e) => setAiPrompt(e.target.value)}
+              disabled={generateAssetMutation.isPending}
+              rows={3}
+              className="text-xs resize-none bg-neutral-950/80 border-neutral-800 placeholder:text-neutral-600 focus-visible:ring-blue-500"
+            />
+
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-2">
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <Tag className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
+                <Input
+                  placeholder={
+                    selectedCategoryFilter !== "ALL" && selectedCategoryFilter !== "UNCATEGORIZED"
+                      ? `Category: ${selectedCategoryFilter}`
+                      : "Category (optional)"
+                  }
+                  value={aiCategory}
+                  onChange={(e) => setAiCategory(e.target.value)}
+                  disabled={generateAssetMutation.isPending}
+                  className="h-8 text-xs w-full sm:w-48 bg-neutral-950/80 border-neutral-800"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                {aiSuccessMessage && (
+                  <span className="text-xs text-green-400 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    {aiSuccessMessage}
+                  </span>
+                )}
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={!aiPrompt.trim() || generateAssetMutation.isPending}
+                  className="text-xs gap-1.5 bg-blue-600 hover:bg-blue-500 text-white w-full sm:w-auto"
+                >
+                  {generateAssetMutation.isPending ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Generating Image...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                      Generate Image
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            {aiError && (
+              <div className="p-2.5 rounded-lg bg-red-950/40 border border-red-800/50 text-xs text-red-300 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>{aiError}</span>
+              </div>
+            )}
+          </form>
+        )}
 
         {/* Dropzone & Multi-Upload Action Area */}
         <div className="flex flex-col gap-2 pb-3 border-b border-neutral-800">

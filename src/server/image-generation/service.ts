@@ -86,12 +86,14 @@ export async function generateImageAsset(
     .replace(/_{2,}/g, "_");
   const filename = `gen_${sanitizedPrompt || "asset"}_${Date.now()}.png`;
 
+  const assetCategory = request.category?.trim() || "ai-generated";
+
   const asset = await createAssetFromUpload(
     userId,
     imageBuffer,
     filename,
     mimeType || "image/png",
-    "ai-generated",
+    assetCategory,
   );
 
   console.log(

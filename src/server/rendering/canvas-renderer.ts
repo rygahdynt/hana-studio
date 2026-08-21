@@ -2,6 +2,8 @@ import { createCanvas, loadImage, type SKRSContext2D } from "@napi-rs/canvas";
 import { registerFonts } from "./fonts";
 import { drawTextElement } from "./text-layout";
 import { processImage } from "@/lib/media/image-processor";
+import { getStorageService } from "@/lib/storage";
+import { db } from "@/server/db";
 import type {
   RenderSlide,
   RenderElement,
@@ -155,6 +157,17 @@ export class CanvasRenderer {
         const res = await fetch(props.src);
         if (res.ok) {
           imageBuffer = Buffer.from(await res.arrayBuffer());
+        }
+      } else if (props.src.startsWith("/api/assets/") || props.assetId) {
+        const assetId =
+          props.assetId ||
+          props.src.replace(/^\/api\/assets\//, "").replace(/\/view.*$/, "");
+        if (assetId) {
+          const asset = await db.asset.findUnique({ where: { id: assetId } });
+          if (asset?.storageKey) {
+            const storageService = getStorageService();
+            imageBuffer = await storageService.downloadBuffer(asset.storageKey);
+          }
         }
       }
 

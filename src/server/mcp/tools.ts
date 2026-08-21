@@ -6,7 +6,15 @@ import {
   getProjectById,
   createProject,
   updateProject,
+  deleteProject,
 } from "@/server/projects";
+import {
+  createRender,
+  getRenderById,
+  listRenders,
+  type CreateRenderSlideInput,
+} from "@/server/renders";
+import type { RenderProject } from "@/types/rendering";
 import { listAssets, resolveRandomAssetByCategory } from "@/server/assets";
 import { generateImageAsset } from "@/server/image-generation";
 import { listTemplates, getTemplateById } from "@/server/templates";
@@ -149,6 +157,47 @@ export function registerHanaStudioTools(server: McpServer, user: User) {
           },
         ],
       };
+    },
+  );
+
+  server.registerTool(
+    "delete_project",
+    {
+      description: "Delete a carousel project and purge its associated renders from storage.",
+      inputSchema: z.object({
+        projectId: z.string().describe("The UUID of the project to delete"),
+      }),
+    },
+    async ({ projectId }) => {
+      try {
+        await deleteProject(projectId, user.id);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  projectId,
+                  message: "Project and associated render artifacts deleted successfully.",
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Failed to delete project: ${err instanceof Error ? err.message : "Unknown error"}`,
+            },
+          ],
+        };
+      }
     },
   );
 
@@ -682,20 +731,299 @@ export function registerHanaStudioTools(server: McpServer, user: User) {
       }),
     },
     async ({ projectId, slideId, elementId }) => {
-      const project = await getProjectById(projectId, user.id);
-      if (!project) return { isError: true, content: [{ type: "text", text: `Project ${projectId} not found.` }] };
+      try {
+        const project = await getProjectById(projectId, user.id);
+        if (!project) return { isError: true, content: [{ type: "text", text: `Project ${projectId} not found.` }] };
 
-      const updatedProject = deleteElementFromProject(project as unknown as EditorProject, slideId, elementId);
+        const updatedProject = deleteElementFromProject(project as unknown as EditorProject, slideId, elementId);
+        await updateProject(projectId, user.id, {
+          slides: updatedProject.slides,
+        });
 
-      await updateProject(projectId, user.id, {
-        slides: updatedProject.slides,
-      });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ success: true, deletedElementId: elementId }, null, 2),
+            },
+          ],
+        };
+      } catch (err) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: `Failed to delete element: ${err instanceof Error ? err.message : "Unknown error"}`,
+          },
+        ],
+      };
+    }
+  },
+);
+
+  // -------------------------------------------------------------------------
+  // 8. Render & Artifact Management Tools
+  // -------------------------------------------------------------------------
+  server.registerTool(
+    "render_project",
+    {
+      description:
+        "Render a carousel project into immutable visual artifacts (PNG slide images + optional ZIP archive), upload them to R2 object storage, and save a persistent Render record.",
+      inputSchema: z.object({
+        projectId: z.string().describe("The UUID of the project to render"),
+        format: z
+          .enum(["png", "jpeg", "webp"])
+          .optional()
+          .default("png")
+          .describe("Image output format (default: 'png')"),
+        quality: z
+          .number()
+          .min(1)
+          .max(100)
+          .optional()
+          .default(90)
+          .describe("Image output quality for jpeg/webp (1-100, default: 90)"),
+        captionSnapshot: z
+          .string()
+          .optional()
+          .describe("Optional custom caption to freeze with this render (defaults to project's current caption)"),
+      }),
+    },
+    async ({ projectId, format, quality, captionSnapshot }) => {
+      try {
+        const project = await getProjectById(projectId, user.id);
+        if (!project) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: `Project with ID ${projectId} not found or access denied.` }],
+          };
+        }
+
+        if (!project.slides || project.slides.length === 0) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: `Project ${projectId} has no slides to render.` }],
+          };
+        }
+
+        // 1. Build RenderProject input structure for headless canvas renderer
+        const renderProjectInput: RenderProject = {
+          id: project.id,
+          title: project.title,
+          slideWidth: project.slideWidth || 1080,
+          slideHeight: project.slideHeight || 1920,
+          slides: project.slides.map((s) => ({
+            id: s.id,
+            position: s.position,
+            backgroundColor: s.backgroundColor || undefined,
+            backgroundImageUrl: s.backgroundImageUrl || undefined,
+            elements: s.elements.map((el) => ({
+              id: el.id,
+              type: el.type as "IMAGE" | "TEXT" | "SHAPE",
+              x: el.x,
+              y: el.y,
+              width: el.width,
+              height: el.height,
+              rotation: el.rotation || 0,
+              opacity: el.opacity ?? 1,
+              zIndex: el.zIndex,
+              properties: {
+                ...(typeof el.properties === "object" && el.properties !== null
+                  ? (el.properties as Record<string, unknown>)
+                  : {}),
+                ...(el.asset?.url
+                  ? { src: ((el.properties as Record<string, unknown>)?.src as string) || el.asset.url }
+                  : {}),
+                ...(el.assetId ? { assetId: el.assetId } : {}),
+              },
+            })),
+          })),
+        };
+
+        // 2. Execute headless server-side rendering (dynamically loaded server-only module)
+        const { renderProjectToBuffers } = await import("@/server/rendering/exporter");
+        const startTime = Date.now();
+        const renderResult = await renderProjectToBuffers(renderProjectInput, {
+          format: format || "png",
+          quality: quality || 90,
+        });
+        const processingMs = Date.now() - startTime;
+
+        // 3. Prepare slide inputs for R2 upload & persistence
+        const slides: CreateRenderSlideInput[] = renderResult.slides.map((s, idx) => ({
+          slideIndex: idx,
+          fileName: s.fileName,
+          width: project.slideWidth || 1080,
+          height: project.slideHeight || 1920,
+          buffer: Buffer.from(s.buffer),
+          contentType: s.contentType,
+        }));
+
+        // 4. Create persistent Render record in database + R2
+        const createdRender = await createRender(user.id, projectId, {
+          captionSnapshot: captionSnapshot !== undefined ? captionSnapshot : project.caption,
+          format: format || "png",
+          processingMs,
+          slides,
+          zipBuffer: renderResult.zipBuffer ? Buffer.from(renderResult.zipBuffer) : undefined,
+          zipFileName: renderResult.zipFileName,
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  status: "SUCCESS",
+                  renderId: createdRender.id,
+                  projectId: createdRender.projectId,
+                  projectName: createdRender.projectName,
+                  slideCount: createdRender.slideCount,
+                  captionSnapshot: createdRender.captionSnapshot,
+                  thumbnailUrl: createdRender.thumbnailUrl,
+                  slides: createdRender.slides.map((s) => ({
+                    slideIndex: s.slideIndex,
+                    fileName: s.fileName,
+                    width: s.width,
+                    height: s.height,
+                    url: s.url,
+                  })),
+                  zipUrl: createdRender.zipUrl,
+                  format: createdRender.format,
+                  processingMs: createdRender.processingMs,
+                  createdAt: createdRender.createdAt,
+                  message: "Project successfully rendered and persisted to R2 storage.",
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Render execution failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+            },
+          ],
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_render",
+    {
+      description:
+        "Retrieve a persistent Render record by its ID, including freshly generated presigned download URLs for all slide PNGs and ZIP archive.",
+      inputSchema: z.object({
+        renderId: z.string().describe("The UUID of the render to retrieve"),
+      }),
+    },
+    async ({ renderId }) => {
+      const render = await getRenderById(renderId, user.id);
+      if (!render) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Render with ID ${renderId} not found or access denied.` }],
+        };
+      }
 
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ success: true, deletedElementId: elementId }, null, 2),
+            text: JSON.stringify(
+              {
+                id: render.id,
+                projectId: render.projectId,
+                projectName: render.projectName,
+                status: render.status,
+                slideCount: render.slideCount,
+                captionSnapshot: render.captionSnapshot,
+                thumbnailUrl: render.thumbnailUrl,
+                slides: render.slides.map((s) => ({
+                  slideIndex: s.slideIndex,
+                  fileName: s.fileName,
+                  width: s.width,
+                  height: s.height,
+                  url: s.url,
+                })),
+                zipUrl: render.zipUrl,
+                format: render.format,
+                processingMs: render.processingMs,
+                createdAt: render.createdAt,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "list_renders",
+    {
+      description:
+        "List recent persistent renders owned by the authenticated user with pagination, optional project filter, and presigned download URLs.",
+      inputSchema: z.object({
+        projectId: z
+          .string()
+          .optional()
+          .describe("Optional project UUID to filter renders for a specific project"),
+        page: z.number().int().min(1).optional().default(1).describe("Page number (default: 1)"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .default(12)
+          .describe("Number of renders per page (default: 12)"),
+        search: z.string().optional().describe("Optional search term matching project name"),
+      }),
+    },
+    async ({ projectId, page, limit, search }) => {
+      const result = await listRenders(user.id, {
+        projectId,
+        page,
+        limit,
+        search,
+      });
+
+      const summary = result.data.map((r) => ({
+        id: r.id,
+        projectId: r.projectId,
+        projectName: r.projectName,
+        status: r.status,
+        slideCount: r.slideCount,
+        captionSnapshot: r.captionSnapshot,
+        thumbnailUrl: r.thumbnailUrl,
+        slideUrls: r.slides.map((s) => s.url),
+        zipUrl: r.zipUrl,
+        format: r.format,
+        createdAt: r.createdAt,
+      }));
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                renders: summary,
+                pagination: result.pagination,
+              },
+              null,
+              2,
+            ),
           },
         ],
       };

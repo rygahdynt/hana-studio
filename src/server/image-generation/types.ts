@@ -1,6 +1,7 @@
 export interface ImageGenerationRequest {
   prompt: string;
   projectId?: string;
+  category?: string;
   referenceAssetIds?: string[];
 }
 

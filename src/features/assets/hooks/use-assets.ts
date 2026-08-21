@@ -113,3 +113,38 @@ export function useDeleteAsset() {
     },
   });
 }
+
+export async function generateAssetApi(params: {
+  prompt: string;
+  category?: string;
+  projectId?: string;
+  referenceAssetIds?: string[];
+}): Promise<{ asset: Asset }> {
+  const res = await fetch("/api/assets/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || "Failed to generate image asset");
+  }
+
+  return res.json();
+}
+
+export function useGenerateAsset() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: {
+      prompt: string;
+      category?: string;
+      projectId?: string;
+      referenceAssetIds?: string[];
+    }) => generateAssetApi(params),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["assets"] });
+    },
+  });
+}

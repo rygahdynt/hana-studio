@@ -1,194 +1,215 @@
+import crypto from "crypto";
 import type { ReferenceImagePayload } from "./types";
-
-const IMAGE_GENERATION_API_KEY = process.env.IMAGE_GENERATION_API_KEY;
-const IMAGE_GENERATION_MODEL = process.env.IMAGE_GENERATION_MODEL || "flux-2-pro";
-const IMAGE_GENERATION_BASE_URL =
-  process.env.IMAGE_GENERATION_BASE_URL || "https://api.bfl.ai";
-
-const POLLING_INTERVAL_MS = 1500;
-const MAX_POLLING_ATTEMPTS = 60; // 90 seconds max timeout
 
 export interface ProviderGenerationOutput {
   imageBuffer: Buffer;
   mimeType: string;
 }
 
-interface BflSubmitResponse {
-  id?: string;
-  polling_url?: string;
-  error?: string | { message?: string };
+interface CachedToken {
+  token: string;
+  expiresAt: number;
 }
 
-interface BflPollResponse {
-  id?: string;
-  status?: "Pending" | "Processing" | "Ready" | "Error" | "Failed" | "Request Moderated" | "Content Moderated" | string;
-  result?: {
-    sample?: string;
-    prompt?: string;
-  };
-  error?: string | { message?: string };
-  details?: string;
+let cachedAuthToken: CachedToken | null = null;
+
+const SAFETY_SETTINGS = [
+  { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+  { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+  { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+  { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+];
+
+function base64UrlEncode(data: string | Buffer): string {
+  const buf = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+  return buf
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
 }
 
 /**
- * Polls the BFL result URL until status is Ready or a terminal failure occurs.
+ * Generates an OAuth2 access token for Google Cloud Service Account using pure Node.js crypto.
+ * Caches the token until 60 seconds before expiration to prevent duplicate auth roundtrips.
  */
-async function pollBflResult(
-  pollingUrl: string,
-  apiKey: string,
+async function getGoogleAccessToken(
+  clientEmail: string,
+  privateKeyRaw: string,
 ): Promise<string> {
-  for (let attempt = 1; attempt <= MAX_POLLING_ATTEMPTS; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, POLLING_INTERVAL_MS));
-
-    const res = await fetch(pollingUrl, {
-      method: "GET",
-      headers: {
-        "x-key": apiKey,
-      },
-    });
-
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        throw new Error("Image generation provider authentication failed.");
-      }
-      if (res.status === 429) {
-        throw new Error("Image generation provider rate limit exceeded.");
-      }
-      const errText = await res.text().catch(() => "Unknown error");
-      throw new Error(`Image generation polling error (${res.status}): ${errText}`);
-    }
-
-    const data: BflPollResponse = await res.json();
-    const status = data.status;
-
-    if (status === "Ready") {
-      const sampleUrl = data.result?.sample;
-      if (!sampleUrl || typeof sampleUrl !== "string") {
-        throw new Error("Image generation completed but sample URL was missing.");
-      }
-      return sampleUrl;
-    }
-
-    if (status === "Pending" || status === "Processing") {
-      // Continue polling
-      continue;
-    }
-
-    if (status === "Request Moderated" || status === "Content Moderated") {
-      throw new Error("Image generation request was moderated by the provider.");
-    }
-
-    if (status === "Error" || status === "Failed") {
-      const detailMsg =
-        typeof data.error === "string"
-          ? data.error
-          : data.error?.message || data.details || "Image generation failed.";
-      throw new Error(`Image generation failed: ${detailMsg}`);
-    }
-
-    // Unrecognized terminal status
-    throw new Error(`Image generation ended with unexpected status: ${status || "Unknown"}`);
+  const now = Math.floor(Date.now() / 1000);
+  if (cachedAuthToken && cachedAuthToken.expiresAt > now + 60) {
+    return cachedAuthToken.token;
   }
 
-  throw new Error("Image generation timed out.");
+  const formattedPrivateKey = privateKeyRaw.includes(String.raw`\n`)
+    ? privateKeyRaw.split(String.raw`\n`).join("\n")
+    : privateKeyRaw;
+
+  const header = {
+    alg: "RS256",
+    typ: "JWT",
+  };
+
+  const payload = {
+    iss: clientEmail,
+    scope: "https://www.googleapis.com/auth/cloud-platform",
+    aud: "https://oauth2.googleapis.com/token",
+    exp: now + 3600,
+    iat: now,
+  };
+
+  const encodedHeader = base64UrlEncode(JSON.stringify(header));
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const unsignedToken = `${encodedHeader}.${encodedPayload}`;
+
+  const signer = crypto.createSign("RSA-SHA256");
+  signer.update(unsignedToken);
+  const signature = signer.sign(formattedPrivateKey, "base64url");
+
+  const jwt = `${unsignedToken}.${signature}`;
+
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
+    }),
+  });
+
+  if (!tokenRes.ok) {
+    const errText = await tokenRes.text().catch(() => "Unknown error");
+    throw new Error(`Google Service Account authentication failed (${tokenRes.status}): ${errText}`);
+  }
+
+  const tokenData = (await tokenRes.json()) as {
+    access_token?: string;
+    expires_in?: number;
+  };
+
+  if (!tokenData.access_token) {
+    throw new Error("Google OAuth2 endpoint returned no access token.");
+  }
+
+  const expiresIn = typeof tokenData.expires_in === "number" ? tokenData.expires_in : 3600;
+
+  cachedAuthToken = {
+    token: tokenData.access_token,
+    expiresAt: now + expiresIn,
+  };
+
+  return tokenData.access_token;
 }
 
 /**
- * Executes server-side image generation using Black Forest Labs (BFL) FLUX.2 [pro].
- * Handles asynchronous task submission, polling, sample download, and buffer extraction.
+ * Executes image generation using Google Cloud Vertex AI (gemini-3.1-flash-image).
+ * Supports prompt text and optional single reference image via multimodal inline_data.
  */
 export async function executeImageGeneration(
   prompt: string,
   references?: ReferenceImagePayload[],
 ): Promise<ProviderGenerationOutput> {
-  if (!IMAGE_GENERATION_API_KEY) {
+  const projectId = process.env.GOOGLE_SERVICE_ACCOUNT_PROJECT_ID;
+  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_CLIENT_EMAIL;
+  const privateKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
+  const model = process.env.VERTEX_AI_IMAGE_MODEL || "gemini-3.1-flash-image";
+  const location = process.env.VERTEX_AI_LOCATION || "global";
+
+  if (!projectId || !clientEmail || !privateKey) {
     throw new Error(
-      "Image generation provider is not configured. Please set IMAGE_GENERATION_API_KEY.",
+      "Google Vertex AI is not configured. Please set GOOGLE_SERVICE_ACCOUNT_PROJECT_ID, GOOGLE_SERVICE_ACCOUNT_CLIENT_EMAIL, and GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.",
     );
   }
 
-  const endpointModel = IMAGE_GENERATION_MODEL.replace(/^v1\//, "").replace(/^\/+/, "");
-  const submitUrl = `${IMAGE_GENERATION_BASE_URL.replace(/\/+$/, "")}/v1/${endpointModel}`;
+  const token = await getGoogleAccessToken(clientEmail, privateKey);
 
-  // 1088 × 1920 matches standard 9:16 portrait ratio and 2MP requirement
-  const payload: Record<string, unknown> = {
-    prompt,
-    width: 1088,
-    height: 1920,
-    prompt_upsampling: false,
-    output_format: "png",
-    safety_tolerance: 2,
-  };
+  const parts: Array<{
+    inline_data?: { mime_type: string; data: string };
+    text?: string;
+  }> = [];
 
-  // Attach reference image as visual identity anchor if provided
+  // 1. Attach optional primary reference image if available
   if (references && references.length > 0) {
     const primaryRef = references[0];
-    if (primaryRef) {
-      const base64Data = primaryRef.buffer.toString("base64");
-      payload.image_prompt = base64Data;
-      payload.input_image = base64Data;
+    if (primaryRef && primaryRef.buffer && primaryRef.buffer.length > 0) {
+      parts.push({
+        inline_data: {
+          mime_type: primaryRef.mimeType || "image/jpeg",
+          data: primaryRef.buffer.toString("base64"),
+        },
+      });
     }
   }
 
-  // 1. Submit Generation Request to BFL
-  const submitRes = await fetch(submitUrl, {
+  // 2. Attach text prompt
+  parts.push({ text: prompt });
+
+  const endpointUrl = `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${model}:generateContent`;
+
+  const res = await fetch(endpointUrl, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      "x-key": IMAGE_GENERATION_API_KEY,
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json; charset=utf-8",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      contents: [{ role: "user", parts }],
+      generation_config: {
+        response_modalities: ["TEXT", "IMAGE"],
+      },
+      safety_settings: SAFETY_SETTINGS,
+    }),
   });
 
-  if (!submitRes.ok) {
-    if (submitRes.status === 401 || submitRes.status === 403) {
-      throw new Error("Image generation provider authentication failed.");
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "Unknown error");
+    if (res.status === 401 || res.status === 403) {
+      throw new Error("Vertex AI authentication failed. Check Google Service Account permissions.");
     }
-    if (submitRes.status === 429) {
-      throw new Error("Image generation provider rate limit exceeded.");
+    if (res.status === 429) {
+      throw new Error("Vertex AI rate limit or quota exceeded.");
     }
-
-    const errText = await submitRes.text().catch(() => "Unknown error");
-    let parsedMessage = errText;
-    try {
-      const errJson = JSON.parse(errText);
-      parsedMessage =
-        typeof errJson.error === "string"
-          ? errJson.error
-          : errJson.error?.message || errJson.message || errText;
-    } catch {
-      // Use raw text
-    }
-
-    throw new Error(`Image generation request failed (${submitRes.status}): ${parsedMessage}`);
+    throw new Error(`Vertex AI image generation failed (${res.status}): ${errText}`);
   }
 
-  const submitData: BflSubmitResponse = await submitRes.json();
-  const pollingUrl =
-    submitData.polling_url ||
-    (submitData.id
-      ? `${IMAGE_GENERATION_BASE_URL.replace(/\/+$/, "")}/v1/get_result?id=${submitData.id}`
-      : null);
-
-  if (!pollingUrl) {
-    throw new Error("Image generation provider did not return a valid task polling URL.");
+  interface VertexPart {
+    inlineData?: {
+      mimeType?: string;
+      data?: string;
+    };
+    text?: string;
   }
 
-  // 2. Poll BFL until Ready
-  const sampleUrl = await pollBflResult(pollingUrl, IMAGE_GENERATION_API_KEY);
-
-  // 3. Download the generated sample image directly to Buffer
-  const imageRes = await fetch(sampleUrl);
-  if (!imageRes.ok) {
-    throw new Error(`Failed to download generated sample image (${imageRes.status}).`);
+  interface VertexCandidate {
+    content?: {
+      parts?: VertexPart[];
+    };
+    finishReason?: string;
   }
 
-  const arrayBuffer = await imageRes.arrayBuffer();
-  const imageBuffer = Buffer.from(arrayBuffer);
-  const mimeType = imageRes.headers.get("content-type") || "image/png";
+  interface VertexResponse {
+    candidates?: VertexCandidate[];
+  }
 
-  return {
-    imageBuffer,
-    mimeType,
-  };
+  const json = (await res.json()) as VertexResponse;
+
+  for (const candidate of json.candidates ?? []) {
+    for (const part of candidate?.content?.parts ?? []) {
+      if (part?.inlineData?.data) {
+        const base64 = part.inlineData.data;
+        const imageBuffer = Buffer.from(base64, "base64");
+        const mimeType = part.inlineData.mimeType || "image/png";
+
+        return {
+          imageBuffer,
+          mimeType,
+        };
+      }
+    }
+  }
+
+  throw new Error("Vertex AI returned a response with no generated image data.");
 }
