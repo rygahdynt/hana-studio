@@ -6,3 +6,239 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum ProjectStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum ElementType {
+  IMAGE
+  TEXT
+  SHAPE
+}
+
+enum AssetStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum RenderStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// User
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  clerkId   String?  @unique @map("clerk_id")
+  name      String?
+  email     String   @unique
+  avatarUrl String?  @map("avatar_url")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  projects Project[]
+  assets   Asset[]
+  renders  Render[]
+  socialAccounts SocialAccount[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Project
+// ---------------------------------------------------------------------------
+
+model Project {
+  id              String         @id @default(uuid()) @db.Uuid
+  userId          String         @map("user_id") @db.Uuid
+  title           String         @default("Untitled Project")
+  description     String?
+  caption         String?
+  status          ProjectStatus  @default(DRAFT)
+  thumbnailUrl    String?        @map("thumbnail_url")
+  templateId      String?        @map("template_id") @db.Uuid
+  socialAccountId String?        @map("social_account_id") @db.Uuid
+  slideWidth      Int            @default(1080) @map("slide_width")
+  slideHeight     Int            @default(1080) @map("slide_height")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template      Template?      @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  socialAccount SocialAccount? @relation(fields: [socialAccountId], references: [id], onDelete: SetNull)
+  slides        Slide[]
+  renders       Render[]
+
+  @@index([userId])
+  @@index([userId, status])
+  @@index([socialAccountId])
+  @@map("projects")
+}
+
+// ---------------------------------------------------------------------------
+// Slide
+// ---------------------------------------------------------------------------
+
+model Slide {
+  id                String   @id @default(uuid()) @db.Uuid
+  projectId         String   @map("project_id") @db.Uuid
+  position          Int
+  backgroundColor   String   @default("#FFFFFF") @map("background_color")
+  backgroundImageUrl String? @map("background_image_url")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  project  Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  elements Element[]
+
+  @@unique([projectId, position])
+  @@index([projectId])
+  @@map("slides")
+}
+
+// ---------------------------------------------------------------------------
+// Element
+// ---------------------------------------------------------------------------
+
+model Element {
+  id        String      @id @default(uuid()) @db.Uuid
+  slideId   String      @map("slide_id") @db.Uuid
+  type      ElementType
+  x         Float       @default(0)
+  y         Float       @default(0)
+  width     Float
+  height    Float
+  rotation  Float       @default(0)
+  opacity   Float       @default(1)
+  locked    Boolean     @default(false)
+  visible   Boolean     @default(true)
+  zIndex    Int         @default(0) @map("z_index")
+  assetId   String?     @map("asset_id") @db.Uuid
+  properties Json
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  slide  Slide   @relation(fields: [slideId], references: [id], onDelete: Cascade)
+  asset  Asset?  @relation(fields: [assetId], references: [id], onDelete: SetNull)
+
+  @@index([slideId])
+  @@index([assetId])
+  @@map("elements")
+}
+
+// ---------------------------------------------------------------------------
+// Asset
+// ---------------------------------------------------------------------------
+
+model Asset {
+  id               String      @id @default(uuid()) @db.Uuid
+  userId           String      @map("user_id") @db.Uuid
+  filename         String
+  originalFilename String      @map("original_filename")
+  mimeType         String      @map("mime_type")
+  sizeBytes        BigInt      @map("size_bytes")
+  width            Int?
+  height           Int?
+  storageKey       String      @map("storage_key")
+  url              String
+  category         String?
+  status           AssetStatus @default(READY)
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  elements Element[]
+
+  @@index([userId])
+  @@index([userId, category])
+  @@map("assets")
+}
+
+// ---------------------------------------------------------------------------
+// Template
+// ---------------------------------------------------------------------------
+
+model Template {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  description String?
+  category    String?
+  thumbnailUrl String? @map("thumbnail_url")
+  definition  Json
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  projects Project[]
+
+  @@index([category])
+  @@index([isActive])
+  @@map("templates")
+}
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+
+model Render {
+  id              String       @id @default(uuid()) @db.Uuid
+  userId          String       @map("user_id") @db.Uuid
+  projectId       String       @map("project_id") @db.Uuid
+  status          RenderStatus @default(PENDING)
+  slideCount      Int          @default(1) @map("slide_count")
+  captionSnapshot String?      @map("caption_snapshot")
+  thumbnailKey    String?      @map("thumbnail_key")
+  outputUrls      Json         @default("[]") @map("output_urls")
+  zipUrl          String?      @map("zip_url")
+  format          String       @default("png")
+  errorMessage    String?      @map("error_message")
+  processingMs    Int?         @map("processing_ms")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([userId, createdAt])
+  @@map("renders")
+}
+
+// ---------------------------------------------------------------------------
+// Social Account
+// ---------------------------------------------------------------------------
+
+model SocialAccount {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @map("user_id") @db.Uuid
+  platform          String   @default("tiktok") // "tiktok" | "instagram" | "linkedin" | "youtube"
+  accountIdentifier String   @map("account_identifier")
+  username          String
+  displayName       String   @map("display_name")
+  avatarUrl         String?  @map("avatar_url")
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projects Project[]
+
+  @@unique([userId, platform, accountIdentifier])
+  @@index([userId])
+  @@index([userId, platform])
+  @@map("social_accounts")
+}
